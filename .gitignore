@@ -4,3 +4,5 @@ build/
 *.tar
 *.pcap
 *.grb
+build*/
+anon*.key

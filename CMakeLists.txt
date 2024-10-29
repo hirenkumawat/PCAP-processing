@@ -48,8 +48,24 @@ list(APPEND CMAKE_PREFIX_PATH /usr/local/lib/cmake)
 list(APPEND CMAKE_PREFIX_PATH /home/gridsan/mjones/GraphBLAS/usr/local/lib/cmake)
 
 find_package(PkgConfig REQUIRED)
-find_package(GraphBLAS REQUIRED)
 find_package(OpenSSL REQUIRED)
+
+# GraphBLAS
+# Run `uname -m` to get the machine architecture
+execute_process(
+    COMMAND uname -m
+    OUTPUT_VARIABLE ARCHITECTURE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Check if the architecture is x86
+if (ARCHITECTURE STREQUAL "x86_64")
+    find_package(GraphBLAS REQUIRED PATHS /nethome/hkumawat3/Documents/GraphBLAS/build/)
+elseif (ARCHITECTURE STREQUAL "aarch64")
+    find_package(GraphBLAS REQUIRED PATHS /nethome/hkumawat3/Documents/GraphBLAS/build/)
+endif()
+
+
 
 pkg_check_modules(LIBDPDK libdpdk-libs)
 if(LIBDPDK_FOUND)

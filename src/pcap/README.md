@@ -1,3 +1,9 @@
+# DOCA RegEx tools
+
+pcap2grbDOCA - uses DOCA RegEx library and the BlueField's RegEx accelerators to extract the source and dest IPs from the .pcap file.
+
+pcap2grbSP - same as pcap2grbDOCA, but instead replaces GraphBLAS hypersparse network traffic matrices with a list of tuples.
+
 # libpcap tools
 
 pcap2grb - This program takes a single input .pcap file and generates GraphBLAS network traffic matrices into a

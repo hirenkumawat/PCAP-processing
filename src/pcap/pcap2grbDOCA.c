@@ -31,7 +31,22 @@
 
 #include "cryptopANT.h"
 
-// Default
+#include <doca_argp.h>
+#include <doca_log.h>
+#include <doca_regex.h>
+#include <doca_mmap.h>
+#include <doca_buf.h>
+#include <doca_buf_inventory.h>
+#include <doca_regex_mempool.h>
+#include <doca_workq.h>
+#include <doca_dev.h>
+#include <doca_ctx.h>
+#include <doca_error.h>
+
+#include <common.h>
+
+DOCA_LOG_REGISTER(MY_APP);
+
 #define SUBWINSIZE (1 << 17) // 131072
 
 #define BSWAP(a)   (pstate->swapped ? ntohl(a) : (a))
@@ -86,37 +101,37 @@ struct posix_tar_header
 struct px3_state *pstate; // global state
 
 // If at first you don't succeed, just abort.
-#define LAGRAPH_TRY_EXIT(method)                                                                                       \
-    {                                                                                                                  \
-        GrB_Info info = (method);                                                                                      \
-        if (!(info == GrB_SUCCESS))                                                                                    \
-        {                                                                                                              \
-            fprintf(stderr, "LAGraph error: [%d]\nFile: %s Line: %d\n", info, __FILE__, __LINE__);                     \
-            exit(5);                                                                                                   \
-        }                                                                                                              \
+#define LAGRAPH_TRY_EXIT(method)
+    {
+        GrB_Info info = (method);
+        if (!(info == GrB_SUCCESS))
+        {
+            fprintf(stderr, "LAGraph error: [%d]\nFile: %s Line: %d\n", info, __FILE__, __LINE__);
+            exit(5);
+        }
     }
 
 // Convenience macros to time code sections.
 #ifndef NDEBUG
-#define TIC(clocktype, msg)                                                                                            \
-    {                                                                                                                  \
-        double t_ts;                                                                                                   \
-        pid_t _mytid = syscall(SYS_gettid);                                                                            \
-        clock_gettime(clocktype, &ts_start);                                                                           \
-        t_ts = ((ts_start.tv_sec * 1e9) + (ts_start.tv_nsec)) * 1e-9;                                                  \
-        fprintf(stderr, "[%d] [%.2f] [%s] Section begin.\n", _mytid, t_ts, msg);                                       \
+#define TIC(clocktype, msg)
+    {
+        double t_ts;
+        pid_t _mytid = syscall(SYS_gettid);
+        clock_gettime(clocktype, &ts_start);
+        t_ts = ((ts_start.tv_sec * 1e9) + (ts_start.tv_nsec)) * 1e-9;
+        fprintf(stderr, "[%d] [%.2f] [%s] Section begin.\n", _mytid, t_ts, msg);
     }
 
-#define TOC(clocktype, msg)                                                                                            \
-    {                                                                                                                  \
-        struct timespec ts_end, tsdiff;                                                                                \
-        double t_ts;                                                                                                   \
-        pid_t _mytid = syscall(SYS_gettid);                                                                            \
-        clock_gettime(clocktype, &ts_end);                                                                             \
-        timespec_diff(&ts_end, &ts_start, &tsdiff);                                                                    \
-        t_ts      = ((ts_start.tv_sec * 1e9) + (ts_start.tv_nsec)) * 1e-9;                                             \
-        t_elapsed = ((tsdiff.tv_sec * 1e9) + (tsdiff.tv_nsec)) * 1e-9;                                                 \
-        fprintf(stderr, "[%d] [%.2f] [%s] elapsed %.2fs\n", _mytid, t_ts, msg, t_elapsed);                             \
+#define TOC(clocktype, msg)
+    {
+        struct timespec ts_end, tsdiff;
+        double t_ts;
+        pid_t _mytid = syscall(SYS_gettid);
+        clock_gettime(clocktype, &ts_end);
+        timespec_diff(&ts_end, &ts_start, &tsdiff);
+        t_ts      = ((ts_start.tv_sec * 1e9) + (ts_start.tv_nsec)) * 1e-9;
+        t_elapsed = ((tsdiff.tv_sec * 1e9) + (tsdiff.tv_nsec)) * 1e-9;
+        fprintf(stderr, "[%d] [%.2f] [%s] elapsed %.2fs\n", _mytid, t_ts, msg, t_elapsed);
     }
 #else
 #define TIC(clocktype, msg)
@@ -124,9 +139,6 @@ struct px3_state *pstate; // global state
 #endif
 
 /// @brief Calculate the delta time (as a struct timespec) between two struct timespec.
-/// @param a Time #1
-/// @param b Time #2
-/// @param result struct timespec containing the elapsed time between them.
 static inline void timespec_diff(struct timespec *a, struct timespec *b, struct timespec *result)
 {
     result->tv_sec  = a->tv_sec - b->tv_sec;
@@ -149,36 +161,10 @@ void usage(const char *name)
     fprintf(stderr, "    -c Path to precomputed IPv4 anonymization table (generated with makecache).\n");
     fprintf(stderr, "    -W Number of GraphBLAS matrices to save in the output tar file.\n");
     fprintf(stderr, "    -w Window size (number of entries) in the saved GraphBLAS matrices.\n");
-    fprintf(stderr, "    -O Single file mode - one tar file containing one GraphBLAS matrix..\n");
+    fprintf(stderr, "    -O Single file mode - one tar file containing one GraphBLAS matrix.\n");
     fprintf(stderr, "    -i Input file (pcap format).\n");
     fprintf(stderr, "    -o Output directory.\n");
 }
-
-/// @brief Find the IPv4 header in a packet (look for ETHERTYPE_IP).
-/// @param base Beginning of packet Ethernet header. (uint8_t)
-/// @return Pointer to the beginning of the IPv4 header, or NULL if not found.
-const uint8_t *find_iphdr(const uint8_t *base)
-{
-    uint16_t ether_type = ntohs(*(uint16_t *)(base + 12));
-
-    if (ether_type == ETHERTYPE_IP) // IP
-    {
-        return base + 14;
-    }
-    else if (ether_type == 0x8100) // VLAN
-    {
-        ether_type = ntohs(*(uint16_t *)(base + 16));
-
-        if (ether_type == ETHERTYPE_IP)
-        {
-            return base + 18;
-        }
-    }
-
-    return NULL;
-}
-
-uint count = 0;
 
 void set_output_filename(void)
 {
@@ -186,8 +172,7 @@ void set_output_filename(void)
     uint32_t windowsize = pstate->subwinsize * pstate->files_per_window;
 
     strftime(timestr, sizeof(timestr), "%Y%m%d-%H%M%S", pstate->f_tm);
-    snprintf(pstate->f_name, sizeof(pstate->f_name), "%s/%s.%u.%u.tar", pstate->out_prefix, timestr, windowsize, count);
-    count++;
+    snprintf(pstate->f_name, sizeof(pstate->f_name), "%s/%s.%u.tar", pstate->out_prefix, timestr, windowsize);
 
     fprintf(stderr, "Setting output filename to %s.\n", pstate->f_name);
 
@@ -268,7 +253,6 @@ int main(int argc, char *argv[])
 {
     FILE *in;
     char in_f[PATH_MAX] = {0}, anonkey[PATH_MAX] = {0}, cachefile[PATH_MAX] = {0};
-    pcap_t *pcap;
     char errbuf[PCAP_ERRBUF_SIZE] = {0};
     char *value = NULL;      // for getopt
     int c, ret, reqargs = 0; // for getopt
@@ -276,13 +260,26 @@ int main(int argc, char *argv[])
     struct timespec ts_start;
     double t_elapsed = 0;
 
-    const uint8_t *buf_p;
-    struct pcap_pkthdr *hdr_p;
-
     pstate                   = calloc(1, sizeof(struct px3_state));
     pstate->f_tm             = NULL;
     pstate->subwinsize       = SUBWINSIZE; // 131072
     pstate->files_per_window = 64;         // 64 x 131072 = 8388608 (default)
+
+    struct doca_dev *dev = NULL;
+    struct doca_regex *doca_regex = NULL;
+    struct doca_mmap *mmap = NULL;
+    struct doca_workq *workq = NULL;
+    struct doca_buf_inventory *buf_inv = NULL;
+    struct doca_buf *buf = NULL;
+    struct doca_regex_search_result *results = NULL;
+    const char *pci_address = "03:00.0"; // TODO: regex pci address?
+    char *rules_buffer = NULL;
+    size_t rules_buffer_len = 0;
+    struct doca_regex_job_search job_request;
+    int nb_chunks = 1; 
+    int nb_enqueued = 0;
+    int nb_dequeued = 0;
+    uint32_t remaining_bytes = 0;
 
     while ((c = getopt(argc, argv, "SO:va:c:i:o:w:W:")) != -1)
     {
@@ -432,18 +429,9 @@ int main(int argc, char *argv[])
         fflush(stderr);
     }
 
-    if ((pcap = pcap_fopen_offline(in, errbuf)) == NULL)
-    {
-        fprintf(stderr, "Error in opening pipefd for reading: %s\n", errbuf);
-        fflush(stderr);
-        return 1;
-    }
-
     if( pstate->out_prefix == NULL )
         pstate->out_prefix = strdup(".");
 
-    pstate->link_type = pcap_datalink(pcap);
-    fprintf(stderr, "input pcap file is of type %s\n", pcap_datalink_val_to_name(pstate->link_type));
     GrB_init(GrB_NONBLOCKING);
 
     GrB_Matrix Gmat;
@@ -451,15 +439,7 @@ int main(int argc, char *argv[])
 
     if( pstate->subwinsize == UINT_MAX )
     {
-        int packets_in_file = 0;
-        long pos = ftell(pcap_file(pcap));
-
-        while( (ret = pcap_next_ex(pcap, &hdr_p, &buf_p)) >= 0 )
-            packets_in_file++;
-
-        fseek(pcap_file(pcap), pos, SEEK_SET);
-        pstate->subwinsize = packets_in_file;
-        fprintf(stderr, "Single file mode, %d packets in pcap file.\n", pstate->subwinsize);
+        fprintf(stderr, "Single file mode.\n");
     }
 
     fprintf(stderr, "Generating tar files with %u matrices of size: %u\n", pstate->files_per_window,
@@ -472,98 +452,228 @@ int main(int argc, char *argv[])
     GrB_Descriptor_new(&desc);
     GxB_Desc_set(desc, GxB_COMPRESSION, GxB_COMPRESSION_ZSTD + 1);
 
+    // DOCA Regex init
+    doca_error_t doca_ret;
+    doca_ret = open_doca_device_with_pci(pci_address, NULL, &dev);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("No device matching PCI address found");
+        exit(EXIT_FAILURE);
+    }
+
+    doca_ret = doca_regex_create(&doca_regex);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to create RegEx device");
+        exit(EXIT_FAILURE);
+    }
+
+    doca_ret = doca_ctx_dev_add(doca_regex_as_ctx(doca_regex), dev);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to set RegEx device. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    // Load compiled rules into the RegEx. Use DOCA RegEx compiler, compile to rules.rof2
+    FILE *rules_file = fopen("rules.rof2", "rb");
+    if (!rules_file) {
+        perror("Cannot open rules file");
+        exit(EXIT_FAILURE);
+    }
+    fseek(rules_file, 0, SEEK_END);
+    rules_buffer_len = ftell(rules_file);
+    fseek(rules_file, 0, SEEK_SET);
+    rules_buffer = malloc(rules_buffer_len);
+    if (fread(rules_buffer, 1, rules_buffer_len, rules_file) != rules_buffer_len) {
+        perror("Cannot read rules file");
+        exit(EXIT_FAILURE);
+    }
+    fclose(rules_file);
+
+    doca_ret = doca_regex_set_hardware_compiled_rules(doca_regex, rules_buffer, rules_buffer_len);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to program rules file. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    // Create and start buffer inventory
+    doca_ret = doca_buf_inventory_create(NULL, 1, DOCA_BUF_EXTENSION_NONE, &buf_inv);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to create buffer inventory. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    doca_ret = doca_buf_inventory_start(buf_inv);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to start buffer inventory. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    // Create and start mmap
+    doca_ret = doca_mmap_create(NULL, &mmap);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to create memory map. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    doca_ret = doca_mmap_dev_add(mmap, dev);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to add device to memory map. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    // Start DOCA RegEx
+    doca_ret = doca_ctx_start(doca_regex_as_ctx(doca_regex));
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to start DOCA RegEx. [%s]", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    doca_ret = doca_workq_create(1, &workq);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to create work queue. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    doca_ret = doca_ctx_workq_add(doca_regex_as_ctx(doca_regex), workq);
+    if (doca_ret != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Unable to attach work queue to RegEx. Reason: %s", doca_get_error_string(doca_ret));
+        exit(EXIT_FAILURE);
+    }
+
+    results = calloc(1, sizeof(struct doca_regex_search_result));
+    if (!results) {
+        DOCA_LOG_ERR("Unable to allocate results storage");
+        exit(EXIT_FAILURE);
+    }
+
+    memset(&job_request, 0, sizeof(job_request));
+    job_request.base.type = DOCA_REGEX_JOB_SEARCH;
+    job_request.rule_group_ids[0] = 1;
+    job_request.base.ctx = doca_regex_as_ctx(doca_regex);
+    job_request.allow_batching = false;
+    job_request.result = results;
+
     TIC(CLOCK_REALTIME, "pcap begin");
+
+    // Open the pcap file
+    pcap_t *pcap = pcap_fopen_offline(in, errbuf);
+    if (!pcap) {
+        fprintf(stderr, "Error in opening pcap file: %s\n", errbuf);
+        exit(EXIT_FAILURE);
+    }
+
+    pstate->link_type = pcap_datalink(pcap);
+    fprintf(stderr, "input pcap file is of type %s\n", pcap_datalink_val_to_name(pstate->link_type));
+
+    struct pcap_pkthdr *hdr_p;
+    const uint8_t *buf_p;
 
     while ((ret = pcap_next_ex(pcap, &hdr_p, &buf_p)) >= 0)
     {
         pstate->total_packets++;
-        struct ip *ip_hdr = NULL;
 
         if (pstate->link_type == DLT_EN10MB)
         {
-            const struct ether_header *eth_hdr = (struct ether_header *)buf_p;
-            ip_hdr                             = (struct ip *)find_iphdr(buf_p);
-        }
-        else if (pstate->link_type == DLT_RAW)
-        {
-            ip_hdr = (struct ip *)buf_p;
-        }
+            // We need to adjust the buffer to start from the Ethernet header
+            size_t packet_len = hdr_p->caplen;
+            uint8_t *packet_data = malloc(packet_len);
+            memcpy(packet_data, buf_p, packet_len);
 
-        if (ip_hdr == NULL) // Not ETHERTYPE_IP.
-        {
-            continue;
-        }
-
-        if (ip_hdr->ip_v == IPVERSION)
-        {
-            uint32_t srcip, dstip;
-
-            if (pstate->findex == 0 && pstate->rec == 0)
-            {
-                if (pstate->f_tm == NULL)
-                {
-                    // printf("packet number %d \n", pstate->total_packets);
-                    // printf("%ld seconds \n", *(&hdr_p->ts.tv_sec));
-                    // printf("%ld nseconds \n", *(&hdr_p->ts.tv_usec));
-                    // // printf("%lld.%.9ld together \n", (long long)&hdr_p->ts.tv_sec, &hdr_p->ts.tv_usec);
-                    pstate->f_tm = localtime(&hdr_p->ts.tv_sec);
-                    // printf("%ld is f_tm \n", pstate->f_tm);
-                    if (pstate->f_name[0] == '\0')
-                    {
-                        set_output_filename();
-                    }
-                }
-                else
-                {
-                    pstate->f_tm = localtime(&hdr_p->ts.tv_sec);
-                }
-            }
-
-            if (pstate->anonymize == 1) // CryptopANT
-            {
-                srcip = scramble_ip4(BSWAP(ip_hdr->ip_src.s_addr), 16);
-                dstip = scramble_ip4(BSWAP(ip_hdr->ip_dst.s_addr), 16);
-            }
-            else if (pstate->anonymize == 2) // precomputed anonymization table
-            {
-                srcip = pstate->ip4cache[BSWAP(ip_hdr->ip_src.s_addr)];
-                dstip = pstate->ip4cache[BSWAP(ip_hdr->ip_dst.s_addr)];
-            }
-            else // no anonymization
-            {
-                srcip = BSWAP(ip_hdr->ip_src.s_addr);
-                dstip = BSWAP(ip_hdr->ip_dst.s_addr);
-            }
-
-            if (srcip > UINT_MAX - 1 || dstip > UINT_MAX - 1) // Global broadcasts.
-            {
+            // Prepare the DOCA RegEx job
+            doca_ret = doca_buf_inventory_buf_by_addr(buf_inv, mmap, packet_data, packet_len, &buf);
+            if (doca_ret != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("Failed to get doca_buf. Reason: %s", doca_get_error_string(doca_ret));
+                free(packet_data);
                 continue;
             }
 
-            pstate->R[pstate->rec] = srcip;
-            pstate->C[pstate->rec] = dstip;
-            pstate->V[pstate->rec] = 1;
+            doca_buf_set_data(buf, packet_data, packet_len);
+            job_request.buffer = buf;
 
-            pstate->rec++;
+            doca_ret = doca_workq_submit(workq, (struct doca_job *)&job_request);
+            if (doca_ret != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("Failed to submit job. Reason: %s", doca_get_error_string(doca_ret));
+                doca_buf_refcount_rm(buf, NULL);
+                free(packet_data);
+                continue;
+            }
+
+            // Wait for the job to complete
+            struct doca_event event = {0};
+            do {
+                doca_ret = doca_workq_progress_retrieve(workq, &event, DOCA_WORKQ_RETRIEVE_FLAGS_NONE);
+            } while (doca_ret == DOCA_ERROR_AGAIN);
+
+            if (doca_ret != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("Failed to retrieve event. Reason: %s", doca_get_error_string(doca_ret));
+                doca_buf_refcount_rm(buf, NULL);
+                free(packet_data);
+                continue;
+            }
+
+            // Process the results
+            struct doca_regex_search_result *result = (struct doca_regex_search_result *)event.result.ptr;
+            struct doca_regex_match *match = result->matches;
+            while (match != NULL) {
+                uint32_t srcip = 0, dstip = 0;
+
+                size_t srcip_offset = match->match_start;
+                size_t dstip_offset = match->match_start + 4;
+
+                if (srcip_offset + 8 <= packet_len) {
+                    memcpy(&srcip, packet_data + srcip_offset, 4);
+                    memcpy(&dstip, packet_data + dstip_offset, 4);
+
+                    srcip = ntohl(srcip);
+                    dstip = ntohl(dstip);
+
+                    if (pstate->anonymize == 1) // CryptopANT
+                    {
+                        srcip = scramble_ip4(srcip, 16);
+                        dstip = scramble_ip4(dstip, 16);
+                    }
+                    else if (pstate->anonymize == 2) // precomputed anonymization table
+                    {
+                        srcip = pstate->ip4cache[srcip];
+                        dstip = pstate->ip4cache[dstip];
+                    }
+                    // else no anonymization
+
+                    pstate->R[pstate->rec] = srcip;
+                    pstate->C[pstate->rec] = dstip;
+                    pstate->V[pstate->rec] = 1;
+
+                    pstate->rec++;
+
+                    if (pstate->rec == pstate->subwinsize)
+                    {
+                        void *blob          = NULL;
+                        GrB_Index blob_size = 0;
+
+                        LAGRAPH_TRY_EXIT(GrB_Matrix_new(&Gmat, GrB_UINT32, 4294967296, 4294967296));
+                        LAGRAPH_TRY_EXIT(
+                            GrB_Matrix_build(Gmat, pstate->R, pstate->C, pstate->V, pstate->subwinsize, GrB_PLUS_UINT32));
+                        LAGRAPH_TRY_EXIT(GxB_Matrix_serialize(&blob, &blob_size, Gmat, desc));
+
+                        add_blob_to_tar(blob, blob_size);
+                        free(blob);
+
+                        GrB_free(&Gmat);
+                        pstate->rec = 0;
+                    }
+                }
+
+                struct doca_regex_match *next_match = match->next;
+                doca_regex_mempool_put_obj(result->matches_mempool, match);
+                match = next_match;
+            }
+
+            doca_buf_refcount_rm(buf, NULL);
+            free(packet_data);
         }
         else
-            pstate->total_invalid++;
-
-        if (pstate->rec == pstate->subwinsize)
         {
-            void *blob          = NULL;
-            GrB_Index blob_size = 0;
-
-            LAGRAPH_TRY_EXIT(GrB_Matrix_new(&Gmat, GrB_UINT32, 4294967296, 4294967296));
-            LAGRAPH_TRY_EXIT(
-                GrB_Matrix_build(Gmat, pstate->R, pstate->C, pstate->V, pstate->subwinsize, GrB_PLUS_UINT32));
-            LAGRAPH_TRY_EXIT(GxB_Matrix_serialize(&blob, &blob_size, Gmat, desc));
-
-            add_blob_to_tar(blob, blob_size);
-            free(blob);
-
-            GrB_free(&Gmat);
-            pstate->rec = 0;
+            // Other link types can be handled similarly
+            continue;
         }
     }
 
@@ -605,8 +715,34 @@ int main(int argc, char *argv[])
     free(pstate->R);
     free(pstate->C);
     free(pstate->V);
+
+    // Cleanup DOCA RegEx resources
+    if (workq != NULL) {
+        doca_ctx_workq_rm(doca_regex_as_ctx(doca_regex), workq);
+        doca_workq_destroy(workq);
+    }
+
+    if (doca_regex != NULL) {
+        doca_ctx_stop(doca_regex_as_ctx(doca_regex));
+        doca_regex_destroy(doca_regex);
+    }
+
+    if (results != NULL) {
+        free(results);
+    }
+
+    if (mmap != NULL) {
+        doca_mmap_destroy(mmap);
+    }
+
+    if (buf_inv != NULL) {
+        doca_buf_inventory_stop(buf_inv);
+        doca_buf_inventory_destroy(buf_inv);
+    }
+
+    if (dev != NULL) {
+        doca_dev_close(dev);
+    }
+
     exit(0);
 }
-
-
-// START
